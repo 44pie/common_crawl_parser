@@ -1,11 +1,18 @@
 """
 E-commerce Platform Detection Module
 Multi-level detection: headers -> cookies -> meta tags -> HTML content
+
+Usage:
+  python detector.py domain.com
+  python detector.py -f domains.txt -w 50 -o results.csv
 """
 
+import sys
+import argparse
 import re
 import requests
 from typing import Optional, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 REQUEST_TIMEOUT = 10
@@ -349,3 +356,213 @@ def check_domain(domain: str, timeout: int = REQUEST_TIMEOUT) -> dict:
         'status_code': response.status_code,
         'error': ''
     }
+
+
+import time
+
+
+def format_time(seconds):
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.1f}m"
+    else:
+        return f"{seconds/3600:.1f}h"
+
+
+def print_stats(stats, elapsed):
+    """Print formatted statistics like crawler.py"""
+    sys.stdout.write('\033[H\033[J')
+    
+    W = 35
+    G = '   '
+    SEP = '-' * W
+    EQ = '=' * (W * 2 + len(G))
+    BLANK = ' ' * W
+    
+    def fmt(label, value, width=W):
+        gap = width - len(label) - len(value)
+        if gap < 1:
+            gap = 1
+        return label + ' ' * gap + value
+    
+    def line(left, right=''):
+        left = left[:W].ljust(W)
+        right = right[:W].ljust(W) if right else BLANK
+        print(left + G + right)
+    
+    rate = stats['checked'] / elapsed if elapsed > 0 else 0
+    det_pct = 100 * stats['detected'] / stats['checked'] if stats['checked'] > 0 else 0
+    err_pct = 100 * stats['errors'] / stats['checked'] if stats['checked'] > 0 else 0
+    
+    print(EQ)
+    line('E-COMMERCE PLATFORM DETECTOR', 'PLATFORMS DETECTED')
+    print(EQ)
+    
+    line(fmt('Domains Checked:', f"{stats['checked']:,}"), SEP)
+    line(fmt('Platforms Found:', f"{stats['detected']:,}"), '')
+    line(fmt('Detection Rate:', f"{det_pct:.1f}%"), '')
+    line(fmt('Errors:', f"{stats['errors']:,} ({err_pct:.1f}%)"), '')
+    line(fmt('Speed:', f"{rate:.1f}/s"), '')
+    line(fmt('Elapsed:', format_time(elapsed)), '')
+    
+    line(SEP, SEP)
+    line('PROGRESS:', 'PLATFORMS:')
+    line(SEP, SEP)
+    
+    plat_list = sorted(stats['platforms'].items(), key=lambda x: -x[1])
+    
+    remaining = stats['total'] - stats['checked']
+    progress_pct = 100 * stats['checked'] / stats['total'] if stats['total'] > 0 else 0
+    
+    rows_left = [
+        fmt('Checked:', f"{stats['checked']:,}"),
+        fmt('Remaining:', f"{remaining:,}"),
+        fmt('Progress:', f"{progress_pct:.1f}%")
+    ]
+    rows_right = []
+    
+    for p, c in plat_list:
+        pct = 100 * c / stats['detected'] if stats['detected'] > 0 else 0
+        rows_right.append(fmt(p, f"{c:,} ({pct:5.1f}%)"))
+    
+    max_rows = max(len(rows_left), len(rows_right), 1)
+    for i in range(max_rows):
+        left = rows_left[i] if i < len(rows_left) else BLANK
+        right = rows_right[i] if i < len(rows_right) else BLANK
+        line(left, right)
+    
+    print()
+    sys.stdout.flush()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='E-commerce Platform Detector',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python detector.py example.com
+  python detector.py -f domains.txt -w 50
+  python detector.py -f domains.txt -o results.csv -t 15
+
+Output: domain, platform, status_code, error
+        """
+    )
+    
+    parser.add_argument(
+        'domain',
+        nargs='?',
+        help='Single domain to check'
+    )
+    
+    parser.add_argument(
+        '-f', '--file',
+        help='File with domains (one per line)'
+    )
+    
+    parser.add_argument(
+        '-w', '--workers',
+        type=int,
+        default=20,
+        help='Parallel workers (default: 20)'
+    )
+    
+    parser.add_argument(
+        '-t', '--timeout',
+        type=int,
+        default=10,
+        help='Request timeout in seconds (default: 10)'
+    )
+    
+    parser.add_argument(
+        '-o', '--output',
+        help='Output CSV file (default: print to stdout)'
+    )
+    
+    args = parser.parse_args()
+    
+    if not args.domain and not args.file:
+        parser.error('Provide a domain or -f/--file with domain list')
+    
+    domains = []
+    if args.domain:
+        domains = [args.domain]
+    elif args.file:
+        with open(args.file, 'r') as f:
+            domains = [line.strip() for line in f if line.strip()]
+    
+    if not domains:
+        print('No domains to check')
+        return
+    
+    results = []
+    
+    if len(domains) == 1:
+        result = check_domain(domains[0], args.timeout)
+        results.append(result)
+        if result['platform']:
+            print(f"{result['domain']}: {result['platform']}")
+        elif result['error']:
+            print(f"{result['domain']}: ERROR - {result['error']}")
+        else:
+            print(f"{result['domain']}: No platform detected")
+    else:
+        stats = {
+            'total': len(domains),
+            'checked': 0,
+            'detected': 0,
+            'errors': 0,
+            'platforms': {}
+        }
+        start_time = time.time()
+        
+        csv_fh = None
+        if args.output:
+            csv_fh = open(args.output, 'w')
+            csv_fh.write('domain,platform,status_code,error\n')
+        
+        print_stats(stats, 0)
+        
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futures = {ex.submit(check_domain, d, args.timeout): d for d in domains}
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                
+                stats['checked'] += 1
+                if result['platform']:
+                    stats['detected'] += 1
+                    p = result['platform']
+                    stats['platforms'][p] = stats['platforms'].get(p, 0) + 1
+                if result['error']:
+                    stats['errors'] += 1
+                
+                if csv_fh:
+                    csv_fh.write(f"{result['domain']},{result['platform']},{result['status_code']},{result['error']}\n")
+                    csv_fh.flush()
+                
+                if stats['checked'] % 10 == 0 or stats['checked'] == len(domains):
+                    print_stats(stats, time.time() - start_time)
+        
+        if csv_fh:
+            csv_fh.close()
+        
+        elapsed = time.time() - start_time
+        print_stats(stats, elapsed)
+        
+        print('=' * 73)
+        print(' COMPLETED '.center(73))
+        print('=' * 73)
+        print()
+        if args.output:
+            print(f'  Results saved to: {args.output}')
+        print(f'  Total domains:    {len(domains):,}')
+        print(f'  Platforms found:  {stats["detected"]:,}')
+        print(f'  Detection rate:   {100*stats["detected"]/len(domains):.1f}%')
+        print(f'  Time elapsed:     {format_time(elapsed)}')
+        print()
+
+
+if __name__ == '__main__':
+    main()
