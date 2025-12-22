@@ -5,8 +5,7 @@ Collect domains from Common Crawl by TLD with CMS detection
 
 Usage:
   python crawler.py -t us,ch,de -l 5000 -o domains.csv
-  python crawler.py -t shop --cms prestashop,magento --ecommerce-only
-  python crawler.py -t co.uk --from 2024 --to 2024 --min-urls 3
+  python crawler.py -t co.uk --from 2024 --to 2024 --min 3
   python crawler.py -t us -l 1000 --live-check -w 50
 """
 
@@ -153,83 +152,70 @@ def format_time(seconds):
         return f"{seconds/3600:.1f}h"
 
 
-def print_progress(stats, active_tlds, config):
+def print_progress(stats, active_tlds, config, all_tlds=None):
     elapsed = time.time() - stats.start_time
-    rate = stats.total_domains / elapsed if elapsed > 0 else 0
     url_rate = stats.total_urls / elapsed if elapsed > 0 else 0
     live_rate = stats.live_checked / elapsed if elapsed > 0 else 0
     
     sys.stdout.write('\033[H\033[J')
     
-    print('=' * 70)
-    print(' COMMON CRAWL SCANNER '.center(35) + ' LIVE CMS CHECKER '.center(35))
-    print('=' * 70)
-    print()
+    W = 35
+    G = '   '
+    SEP = '-' * W
+    EQ = '=' * (W * 2 + len(G))
+    BLANK = ' ' * W
     
-    print(f'  URLs Scanned:   {stats.total_urls:>10,}', end='')
-    if stats.live_active:
-        print(f'      Live Checked: {stats.live_checked:>10,}')
+    def fmt(label, value, width=W):
+        gap = width - len(label) - len(value)
+        if gap < 1:
+            gap = 1
+        return label + ' ' * gap + value
+    
+    def line(left, right=''):
+        left = left[:W].ljust(W)
+        right = (right[:W].ljust(W)) if right else BLANK
+        print(left + G + right if stats.live_active else left)
+    
+    print(EQ)
+    line('COMMON CRAWL SCANNER', 'LIVE CMS CHECKER')
+    print(EQ)
+    
+    line(fmt('URLs Scanned:', f'{stats.total_urls:,}'), fmt('Live Checked:', f'{stats.live_checked:,}'))
+    line(fmt('Domains Found:', f'{stats.total_domains:,}'), fmt('CMS Detected:', f'{stats.live_detected:,}'))
+    
+    det_rate = 100 * stats.live_detected / stats.live_checked if stats.live_checked > 0 else 0
+    line(fmt('E-commerce:', f'{stats.ecommerce_count:,}'), fmt('Detection:', f'{det_rate:.1f}%'))
+    line(fmt('Speed:', f'{url_rate:.0f}/s'), fmt('Speed:', f'{live_rate:.0f}/s'))
+    line(fmt('Queue:', f'{stats.live_queue_size:,}'), fmt('Elapsed:', format_time(elapsed)))
+    
+    line(SEP, SEP)
+    line('DOMAINS BY TLD:', 'LIVE PLATFORMS:')
+    line(SEP, SEP)
+    
+    if all_tlds:
+        tld_list = [(t, stats.domains_by_tld.get(t, 0)) for t in all_tlds]
     else:
-        print()
+        tld_list = list(sorted(stats.domains_by_tld.items(), key=lambda x: -x[1]))[:8]
     
-    print(f'  Domains Found:  {stats.total_domains:>10,}', end='')
-    if stats.live_active:
-        print(f'      CMS Detected: {stats.live_detected:>10,}')
-    else:
-        print()
+    plat_list = list(sorted(stats.live_platforms.items(), key=lambda x: -x[1])) if stats.live_active else []
     
-    print(f'  E-commerce:     {stats.ecommerce_count:>10,}', end='')
-    if stats.live_active:
-        det_rate = 100 * stats.live_detected / stats.live_checked if stats.live_checked > 0 else 0
-        print(f'      Detection:    {det_rate:>9.1f}%')
-    else:
-        print()
-    
-    print(f'  Speed:          {url_rate:>10.0f}/s', end='')
-    if stats.live_active:
-        print(f'      Speed:        {live_rate:>10.0f}/s')
-    else:
-        print()
-    
-    print(f'  Queue:          {stats.live_queue_size:>10,}', end='')
-    print(f'      Elapsed:      {format_time(elapsed):>10}')
-    print()
-    
-    if config.get('filters'):
-        print('  FILTERS:', ', '.join(config['filters'][:3]))
-        print()
-    
-    col1_items = list(sorted(stats.domains_by_tld.items(), key=lambda x: -x[1]))[:8]
-    col2_items = list(sorted(stats.live_platforms.items(), key=lambda x: -x[1]))[:8] if stats.live_active else []
-    
-    print('  DOMAINS BY TLD:'.ljust(35) + ('LIVE PLATFORMS:' if stats.live_active else ''))
-    print('  ' + '-' * 30 + ('     ' + '-' * 30 if stats.live_active else ''))
-    
-    max_rows = max(len(col1_items), len(col2_items), 1)
+    max_rows = max(len(tld_list), len(plat_list), 1)
     for i in range(max_rows):
-        left = ''
-        if i < len(col1_items):
-            tld, count = col1_items[i]
-            status = '*' if tld in active_tlds else ''
-            left = f'    .{tld:10} {count:>8,} {status}'
+        left = BLANK
+        if i < len(tld_list):
+            tld, count = tld_list[i]
+            status = ' *' if tld in active_tlds else ''
+            left = fmt(f'.{tld}', f'{count:,}{status}')
         
-        right = ''
-        if stats.live_active and i < len(col2_items):
-            p, c = col2_items[i]
+        right = BLANK
+        if i < len(plat_list):
+            p, c = plat_list[i]
             pct = 100 * c / stats.live_detected if stats.live_detected > 0 else 0
-            right = f'    {p:14} {c:>6,} ({pct:4.1f}%)'
+            right = fmt(p, f'{c:,} ({pct:5.1f}%)')
         
-        print(f'{left:<35}{right}')
+        line(left, right)
     
     print()
-    
-    if stats.cms_counts:
-        print('  URL-DETECTED CMS:')
-        print('  ' + '-' * 30)
-        for cms, count in list(sorted(stats.cms_counts.items(), key=lambda x: -x[1]))[:5]:
-            print(f'    {cms:15} {count:>8,}')
-    print()
-    
     sys.stdout.flush()
 
 
@@ -243,11 +229,9 @@ def is_ecommerce(url, keywords):
     return any(k in u for k in keywords)
 
 
-def detect_cms(url, cms_filter=None):
+def detect_cms(url):
     u = url.lower()
     for cms, patterns in CMS_PATTERNS.items():
-        if cms_filter and cms.lower() not in [c.lower() for c in cms_filter]:
-            continue
         if any(p in u for p in patterns):
             return cms
     return None
@@ -321,17 +305,7 @@ def collect_tld(tld, args, csv_fh, lock, stats, active_tlds, exclude_domains, co
                 continue
             
             ecom = is_ecommerce(url, ECOMMERCE_KEYWORDS)
-            
-            if args.ecommerce_only and not ecom:
-                stats.add_skip()
-                continue
-            
-            cms_filter = args.cms.split(',') if args.cms else None
-            cms = detect_cms(url, cms_filter)
-            
-            if args.cms and not cms:
-                stats.add_skip()
-                continue
+            cms = detect_cms(url)
             
             if domain in seen:
                 seen[domain]['count'] += 1
@@ -390,62 +364,6 @@ def collect_tld(tld, args, csv_fh, lock, stats, active_tlds, exclude_domains, co
     return tld, stats.domains_by_tld.get(tld, 0)
 
 
-def list_available_crawls():
-    """List all available Common Crawl indexes"""
-    import urllib.request
-    import json
-    
-    print()
-    print('=' * 70)
-    print(' AVAILABLE COMMON CRAWL INDEXES '.center(70))
-    print('=' * 70)
-    print()
-    print('  Fetching index list from index.commoncrawl.org...')
-    print()
-    
-    try:
-        url = 'https://index.commoncrawl.org/collinfo.json'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        
-        print(f'  Found {len(data)} crawl indexes:')
-        print()
-        print('  ' + '-' * 66)
-        print(f'  {"Crawl ID":<25} {"API Endpoint":<40}')
-        print('  ' + '-' * 66)
-        
-        for i, crawl in enumerate(data[:30]):
-            name = crawl.get('name', crawl.get('id', 'unknown'))
-            api = crawl.get('cdx-api', '')
-            if api:
-                api = api.replace('https://index.commoncrawl.org/', '')
-            print(f'  {name:<25} {api:<40}')
-        
-        if len(data) > 30:
-            print(f'  ... and {len(data) - 30} more crawls')
-        
-        print()
-        print('  Use --from and --to to filter by date:')
-        print('    --from 2024        (year)')
-        print('    --from 202401      (year + month)')  
-        print('    --from 20240115    (full date)')
-        print()
-        print('  Examples:')
-        print('    python crawler.py -t us --from 2024 --to 2024')
-        print('    python crawler.py -t shop --from 2025')
-        print()
-        print('  API info: https://index.commoncrawl.org/')
-        print('  Stats: https://commoncrawl.github.io/cc-crawl-statistics/')
-        print()
-        
-    except Exception as e:
-        print(f'  ERROR: Could not fetch crawl list: {e}')
-        print()
-        print('  Manual check: https://index.commoncrawl.org/collinfo.json')
-        print()
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='Global E-Commerce Domain Crawler',
@@ -453,14 +371,10 @@ def main():
         epilog="""
 Examples:
   python crawler.py -t us,ch,de -l 5000 -o domains.csv
-  python crawler.py -t shop --cms prestashop,magento -e
-  python crawler.py -t co.uk --from 2024 --to 2024 --min-urls 3
-  python crawler.py -t store -k cart,checkout,buy -e
+  python crawler.py -t co.uk --from 2024 --to 2024 --min 3
+  python crawler.py -t store -k cart,checkout,buy
   python crawler.py -t us -x exclude.txt --status 200,301
-
-Supported CMS:
-  PrestaShop, Magento, WooCommerce, Shopify, OpenCart, 
-  VTEX, BigCommerce, Wix, Squarespace
+  python crawler.py -t cl --live-check --live-threads 100
 
 Output CSV columns:
   domain, tld, country, is_ecommerce, cms, timestamp, language
@@ -486,10 +400,10 @@ Output CSV columns:
     )
     
     parser.add_argument(
-        '-w', '--threads',
+        '-w', '--workers',
         type=int,
         default=1,
-        help='Parallel threads for TLDs (default: 1)'
+        help='Parallel workers for TLDs (default: 1)'
     )
     
     parser.add_argument(
@@ -504,16 +418,6 @@ Output CSV columns:
         help='Filter by keywords in URL (comma-separated: cart,checkout,buy)'
     )
     
-    parser.add_argument(
-        '-e', '--ecommerce-only',
-        action='store_true',
-        help='Only save domains with e-commerce signals'
-    )
-    
-    parser.add_argument(
-        '-c', '--cms',
-        help='Filter by CMS (comma-separated: prestashop,magento,woocommerce)'
-    )
     
     parser.add_argument(
         '-x', '--exclude',
@@ -521,7 +425,8 @@ Output CSV columns:
     )
     
     parser.add_argument(
-        '--min-urls',
+        '--min',
+        dest='min_urls',
         type=int,
         default=1,
         help='Min URL occurrences for domain to be saved (default: 1)'
@@ -556,25 +461,6 @@ Output CSV columns:
     )
     
     parser.add_argument(
-        '--list-crawls',
-        action='store_true',
-        help='List all available Common Crawl indexes and exit'
-    )
-    
-    parser.add_argument(
-        '--ranking',
-        choices=['tranco', 'majestic'],
-        help='Filter only domains in Tranco or Majestic Million top-1M list'
-    )
-    
-    parser.add_argument(
-        '--top',
-        type=int,
-        default=1000000,
-        help='Max rank to include from ranking list (default: 1,000,000)'
-    )
-    
-    parser.add_argument(
         '--live-check',
         action='store_true',
         help='After crawling, verify domains with live HTTP requests (uses detector.py)'
@@ -596,22 +482,14 @@ Output CSV columns:
     
     args = parser.parse_args()
     
-    if args.list_crawls:
-        list_available_crawls()
-        return
-    
     if not args.tld:
-        parser.error('-t/--tld is required (use --list-crawls to see available indexes)')
+        parser.error('-t/--tld is required')
     
     tlds = [t.strip() for t in args.tld.split(',')]
     
     filters = []
     if args.keywords:
         filters.append(f"Keywords: {args.keywords}")
-    if args.ecommerce_only:
-        filters.append("E-commerce only")
-    if args.cms:
-        filters.append(f"CMS: {args.cms}")
     if args.exclude:
         filters.append(f"Exclude: {args.exclude}")
     if args.min_urls > 1:
@@ -638,7 +516,7 @@ Output CSV columns:
     print()
     print(f'  TLDs:      {", ".join(tlds)}')
     print(f'  Limit:     {args.limit:,} per TLD')
-    print(f'  Threads:   {args.threads}')
+    print(f'  Threads:   {args.workers}')
     print(f'  Pages:     {args.pages}')
     print(f'  Output:    {output_dir}/')
     print(f'             - crawl_domains.csv')
@@ -665,6 +543,8 @@ Output CSV columns:
     
     lock = threading.Lock()
     stats = Stats()
+    for t in tlds:
+        stats.domains_by_tld[t] = 0
     active_tlds = set()
     
     live_queue = queue.Queue()
@@ -727,14 +607,14 @@ Output CSV columns:
     
     def progress_thread():
         while active_tlds or stats.total_domains == 0 or (args.live_check and stats.live_queue_size > 0):
-            print_progress(stats, active_tlds, config)
+            print_progress(stats, active_tlds, config, tlds)
             time.sleep(2)
-        print_progress(stats, active_tlds, config)
+        print_progress(stats, active_tlds, config, tlds)
     
     progress = threading.Thread(target=progress_thread, daemon=True)
     progress.start()
     
-    with ThreadPoolExecutor(max_workers=args.threads) as ex:
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = [
             ex.submit(
                 collect_tld, tld, args, csv_fh, lock, stats, 
