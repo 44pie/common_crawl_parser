@@ -280,67 +280,114 @@ def collect_tld(tld, args, csv_fh, lock, stats, active_tlds, exclude_domains, co
         if args.date_to:
             iter_kwargs['to'] = args.date_to
         
-        for obj in cdx.iter(f'*.{tld}/*', **iter_kwargs):
-            stats.add_url()
-            
-            if obj.get('page', 0) > args.pages:
+        max_retries = 5
+        retry_count = 0
+        cdx_iter = None
+        
+        while retry_count < max_retries:
+            try:
+                if cdx_iter is None:
+                    cdx_iter = cdx.iter(f'*.{tld}/*', **iter_kwargs)
                 break
-            
-            url = obj.get('url', '')
-            domain = extract_domain(url)
-            
-            if not domain or not domain.endswith(f'.{tld}'):
-                continue
-            
-            if any(b in domain for b in BAD_PATTERNS):
-                stats.add_skip()
-                continue
-            
-            if domain in exclude_domains:
-                stats.add_skip()
-                continue
-            
-            if args.keywords and not matches_keywords(url, args.keywords.split(',')):
-                stats.add_skip()
-                continue
-            
-            ecom = is_ecommerce(url, ECOMMERCE_KEYWORDS)
-            cms = detect_cms(url)
-            
-            if domain in seen:
-                seen[domain]['count'] += 1
-                if cms and not seen[domain]['cms']:
-                    seen[domain]['cms'] = cms
-                if ecom:
-                    seen[domain]['ecom'] = True
-                continue
-            
-            seen[domain] = {
-                'count': 1,
-                'cms': cms,
-                'ecom': ecom,
-                'timestamp': obj.get('timestamp', ''),
-                'lang': obj.get('languages', '')
-            }
-            
-            if args.min_urls <= 1:
-                if hasattr(stats, 'add_domain_with_queue'):
-                    stats.add_domain_with_queue(tld, cms, ecom, domain)
+            except Exception as e:
+                retry_count += 1
+                print(f"\n[!] CDX init error (retry {retry_count}/{max_retries}): {e}")
+                time.sleep(5 * retry_count)
+                cdx = cdx_toolkit.CDXFetcher(source='cc')
+        
+        if cdx_iter is None:
+            print(f"\n[!] Failed to init CDX for {tld} after {max_retries} retries")
+            return
+        
+        consecutive_errors = 0
+        while True:
+            try:
+                for obj in cdx_iter:
+                    consecutive_errors = 0
+                    stats.add_url()
+                    
+                    if obj.get('page', 0) > args.pages:
+                        break
+                    
+                    url = obj.get('url', '')
+                    domain = extract_domain(url)
+                    
+                    if not domain or not domain.endswith(f'.{tld}'):
+                        continue
+                    
+                    if any(b in domain for b in BAD_PATTERNS):
+                        stats.add_skip()
+                        continue
+                    
+                    if domain in exclude_domains:
+                        stats.add_skip()
+                        continue
+                    
+                    if args.keywords and not matches_keywords(url, args.keywords.split(',')):
+                        stats.add_skip()
+                        continue
+                    
+                    ecom = is_ecommerce(url, ECOMMERCE_KEYWORDS)
+                    cms = detect_cms(url)
+                    
+                    if domain in seen:
+                        seen[domain]['count'] += 1
+                        if cms and not seen[domain]['cms']:
+                            seen[domain]['cms'] = cms
+                        if ecom:
+                            seen[domain]['ecom'] = True
+                        continue
+                    
+                    seen[domain] = {
+                        'count': 1,
+                        'cms': cms,
+                        'ecom': ecom,
+                        'timestamp': obj.get('timestamp', ''),
+                        'lang': obj.get('languages', '')
+                    }
+                    
+                    if args.min_urls <= 1:
+                        if hasattr(stats, 'add_domain_with_queue'):
+                            stats.add_domain_with_queue(tld, cms, ecom, domain)
+                        else:
+                            stats.add_domain(tld, cms, ecom)
+                        
+                        with lock:
+                            csv_fh.write(
+                                f"{domain},{tld},{country},{ecom},{cms or ''},"
+                                f"{obj.get('timestamp','')},{seen[domain]['lang']}\n"
+                            )
+                            csv_fh.flush()
+                    
+                    if len(seen) >= args.limit * 2:
+                        break
+                break
+            except (ConnectionError, TimeoutError, OSError) as e:
+                consecutive_errors += 1
+                if consecutive_errors >= 5:
+                    print(f"\n[!] {tld}: Too many errors, stopping. Last: {e}")
+                    break
+                print(f"\n[!] {tld}: Connection error (retry {consecutive_errors}/5): {e}")
+                time.sleep(10 * consecutive_errors)
+                cdx = cdx_toolkit.CDXFetcher(source='cc')
+                cdx_iter = cdx.iter(f'*.{tld}/*', **iter_kwargs)
+            except StopIteration:
+                break
+            except Exception as e:
+                if 'RemoteDisconnected' in str(e) or 'Connection' in str(e):
+                    consecutive_errors += 1
+                    if consecutive_errors >= 5:
+                        print(f"\n[!] {tld}: Too many errors, stopping.")
+                        break
+                    print(f"\n[!] {tld}: Reconnecting ({consecutive_errors}/5)...")
+                    time.sleep(10 * consecutive_errors)
+                    cdx = cdx_toolkit.CDXFetcher(source='cc')
+                    cdx_iter = cdx.iter(f'*.{tld}/*', **iter_kwargs)
                 else:
-                    stats.add_domain(tld, cms, ecom)
-                
-                with lock:
-                    csv_fh.write(
-                        f"{domain},{tld},{country},{ecom},{cms or ''},"
-                        f"{obj.get('timestamp','')},{seen[domain]['lang']}\n"
-                    )
-                    csv_fh.flush()
-            
-            if len(seen) >= args.limit * 2:
-                break
+                    break
     
     except Exception as e:
-        pass
+        print(f"\n[!] {tld}: Error: {e}")
     
     if args.min_urls > 1:
         for domain, data in seen.items():
