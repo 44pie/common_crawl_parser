@@ -47,7 +47,7 @@ class Stats:
         self.lock = threading.Lock()
         self.domains_by_tld = {}
         self.total_domains = 0
-        self.total_urls = 0  # alias for lines, for checkpoint compatibility
+        self.total_urls = 0
         self.ecommerce_count = 0
         self.skipped = 0
         self.cms_counts = {}
@@ -143,8 +143,15 @@ def find_chunks_for_tlds(tlds, cache_path=None):
 
 
 def extract_domain_from_url(url):
-    m = re.search(r'https?://(?:www\.)?([^/:]+)', url)
-    return m.group(1).lower() if m else None
+    try:
+        if '://' in url:
+            url = url.split('://', 1)[1]
+        domain = url.split('/')[0].split(':')[0].lower()
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        return domain if '.' in domain else None
+    except:
+        return None
 
 
 def download_to_disk(url, dest_path):
@@ -177,7 +184,7 @@ def process_chunk_from_disk(chunk_path, tld_prefixes, stats, seen, checkpoint, l
                 if not matched_tld:
                     continue
                 
-                if stats.domains_by_tld.get(matched_tld, 0) >= limit:
+                if limit > 0 and stats.domains_by_tld.get(matched_tld, 0) >= limit:
                     continue
                 
                 parts = line_str.split(' ', 2)
@@ -261,13 +268,28 @@ def process_chunk(chunk_id, tld_chunks, stats, seen, checkpoint, limit, lock, te
         if chunk_path.exists():
             try:
                 os.remove(chunk_path)
-            except Exception as e:
-                print(f"\n[!] Failed to delete {chunk_path}: {e}")
+            except Exception:
+                pass
     
     with stats.lock:
         stats.chunks_done += 1
     
     return counts
+
+
+def get_disk_usage(temp_dir):
+    """Safe disk usage calculation"""
+    try:
+        total = 0
+        for f in list(Path(temp_dir).glob('*.gz')):
+            try:
+                if f.exists():
+                    total += f.stat().st_size
+            except (OSError, FileNotFoundError):
+                pass
+        return total / 1024 / 1024
+    except Exception:
+        return 0.0
 
 
 def print_status(stats, temp_dir, tlds):
@@ -276,7 +298,7 @@ def print_status(stats, temp_dir, tlds):
     line_rate = stats.total_lines / elapsed if elapsed > 0 else 0
     live_rate = stats.live_checked / elapsed if elapsed > 0 else 0
     
-    disk_mb = sum(f.stat().st_size for f in Path(temp_dir).glob('*.gz') if f.exists()) / 1024 / 1024
+    disk_mb = get_disk_usage(temp_dir)
     
     sys.stdout.write('\033[H\033[J')
     
@@ -316,30 +338,31 @@ def print_status(stats, temp_dir, tlds):
     plat_list = list(sorted(stats.live_platforms.items(), key=lambda x: -x[1])) if stats.live_active else []
     
     max_rows = max(len(tld_list), len(plat_list), 1)
+    total_plat = sum(v for _, v in plat_list) if plat_list else 0
+    
     for i in range(max_rows):
         left = BLANK
         if i < len(tld_list):
             tld, cnt = tld_list[i]
-            status = ' *' if cnt > 0 and stats.chunks_done < stats.chunks_total else ''
-            left = fmt(f'.{tld}', f'{cnt:,}{status}')
+            marker = ' *' if cnt >= stats.domains_by_tld.get('_limit', float('inf')) else ''
+            left = fmt(f'.{tld}', f'{cnt:,}{marker}')
         
         right = BLANK
         if i < len(plat_list):
-            p, c = plat_list[i]
-            pct = 100 * c / stats.live_detected if stats.live_detected > 0 else 0
-            right = fmt(p, f'{c:,} ({pct:5.1f}%)')
+            plat, cnt = plat_list[i]
+            pct = 100 * cnt / total_plat if total_plat > 0 else 0
+            right = fmt(plat[:20], f'{cnt:,} ({pct:5.1f}%)')
         
         line(left, right)
     
     print()
-    sys.stdout.flush()
 
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Disk-based CDX Crawler with Live CMS Check')
     parser.add_argument('-t', '--tld', required=True, help='TLDs comma-separated')
-    parser.add_argument('-l', '--limit', type=int, default=100000, help='Limit per TLD')
+    parser.add_argument('-l', '--limit', type=int, default=100000, help='Limit per TLD (0=unlimited)')
     parser.add_argument('-w', '--workers', type=int, default=3, help='Parallel downloads')
     parser.add_argument('-o', '--output', default='output', help='Output dir')
     parser.add_argument('-c', '--cache-size', type=int, default=5, help='Max chunks cached on disk')
@@ -358,7 +381,10 @@ def main():
     temp_dir.mkdir(exist_ok=True)
     
     for old_chunk in temp_dir.glob('*.gz'):
-        old_chunk.unlink()
+        try:
+            old_chunk.unlink()
+        except:
+            pass
     
     cluster_cache = output_dir / 'cluster.idx.cache'
     chunks, tld_chunks = find_chunks_for_tlds(tlds, str(cluster_cache))
@@ -386,7 +412,7 @@ def main():
     lock = threading.Lock()
     semaphore = threading.Semaphore(args.cache_size)
     
-    if checkpoint:
+    if args.resume and checkpoint:
         seen = checkpoint.get_all_domains()
         if seen:
             print(f"Loaded {len(seen):,} existing domains from checkpoint")
@@ -400,65 +426,64 @@ def main():
     
     if args.live_check:
         if not DETECTOR_AVAILABLE:
-            print("ERROR: detector.py not found. --live-check requires detector module.")
-            sys.exit(1)
-        
-        stats.live_active = True
-        live_queue = queue.Queue()
-        
-        live_csv_path = output_dir / 'live_detected.csv'
-        live_csv_fh = open(live_csv_path, 'a' if args.resume else 'w', newline='', encoding='utf-8')
-        live_writer = csv.DictWriter(live_csv_fh, fieldnames=['domain', 'platform', 'status_code', 'error'])
-        if not args.resume:
-            live_writer.writeheader()
-        live_csv_fh.flush()
-        
-        def live_worker():
-            while True:
-                try:
-                    domain = live_queue.get(timeout=1)
-                    if domain is None:
-                        break
-                    
+            print("[!] detector.py not found - live check disabled")
+        else:
+            stats.live_active = True
+            live_queue = queue.Queue()
+            live_csv_path = output_dir / 'live_detected.csv'
+            live_csv_fh = open(live_csv_path, 'a', newline='', encoding='utf-8')
+            live_writer = csv.writer(live_csv_fh)
+            if live_csv_path.stat().st_size == 0:
+                live_writer.writerow(['domain', 'platform', 'version', 'check_time'])
+            
+            def live_worker():
+                while not crawl_done.is_set() or not live_queue.empty():
                     try:
-                        result = check_domain(domain, args.live_timeout)
-                        platform = result.get('platform', '')
-                        stats.add_live_check(platform if platform else None)
-                        
+                        domain = live_queue.get(timeout=1)
+                        if domain is None:
+                            break
+                        result = check_domain(domain, timeout=args.live_timeout)
+                        platform = result.get('platform') if result else None
+                        stats.add_live_check(platform)
                         if platform and live_writer:
-                            with lock:
-                                live_writer.writerow(result)
-                                live_csv_fh.flush()
+                            live_writer.writerow([
+                                domain, platform,
+                                result.get('version', ''),
+                                time.strftime('%Y-%m-%d %H:%M:%S')
+                            ])
+                            live_csv_fh.flush()
+                        with stats.lock:
+                            stats.live_queue_size = live_queue.qsize()
+                        live_queue.task_done()
+                    except queue.Empty:
+                        continue
                     except Exception:
-                        stats.add_live_check(None)
-                    
-                    with stats.lock:
-                        stats.live_queue_size = live_queue.qsize()
-                    
-                    live_queue.task_done()
-                except queue.Empty:
-                    if crawl_done.is_set() and live_queue.empty():
-                        break
-        
-        for _ in range(args.live_threads):
-            t = threading.Thread(target=live_worker, daemon=True)
-            t.start()
-            live_workers.append(t)
-    
-    print(f"\nLimit: {args.limit:,} per TLD")
-    if args.live_check:
-        print(f"Live check: {args.live_threads} threads, {args.live_timeout}s timeout")
-    print("Starting in 3 seconds...\n")
-    time.sleep(3)
+                        live_queue.task_done()
+            
+            for _ in range(args.live_threads):
+                t = threading.Thread(target=live_worker, daemon=True)
+                t.start()
+                live_workers.append(t)
     
     running = [True]
     
     def status_thread():
         while running[0]:
-            print_status(stats, temp_dir, tlds)
-            time.sleep(2)
+            try:
+                print_status(stats, temp_dir, tlds)
+            except Exception:
+                pass
+            time.sleep(1)
     
-    threading.Thread(target=status_thread, daemon=True).start()
+    status_t = threading.Thread(target=status_thread, daemon=True)
+    status_t.start()
+    
+    print(f"\nLimit: {args.limit:,} per TLD" if args.limit > 0 else "\nNo limit per TLD")
+    print(f"Workers: {args.workers}")
+    if args.live_check and DETECTOR_AVAILABLE:
+        print(f"Live threads: {args.live_threads}")
+    print("\nStarting crawl...\n")
+    time.sleep(2)
     
     def worker(chunk_id):
         with semaphore:
@@ -479,7 +504,7 @@ def main():
     
     crawl_done.set()
     
-    if args.live_check:
+    if args.live_check and live_queue:
         live_queue.join()
         for _ in live_workers:
             live_queue.put(None)
@@ -492,7 +517,10 @@ def main():
     time.sleep(0.5)
     
     for old_chunk in temp_dir.glob('*.gz'):
-        old_chunk.unlink()
+        try:
+            old_chunk.unlink()
+        except:
+            pass
     
     if checkpoint:
         checkpoint.save_stats(stats)
