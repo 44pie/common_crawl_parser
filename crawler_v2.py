@@ -651,5 +651,43 @@ Resume mode:
     print()
 
 
+def run_with_auto_restart(max_restarts=100, restart_delay=30):
+    """Auto-restart on any crash - never stop until done"""
+    restarts = 0
+    
+    while restarts < max_restarts:
+        try:
+            main()
+            print("\n[+] Completed successfully!")
+            break
+        except KeyboardInterrupt:
+            print("\n[!] Ctrl+C - exiting...")
+            break
+        except SystemExit as e:
+            if e.code == 0:
+                break
+            restarts += 1
+            print(f"\n[!] Exit code {e.code}, restart #{restarts} in {restart_delay}s...")
+            time.sleep(restart_delay)
+        except Exception as e:
+            restarts += 1
+            print(f"\n[!!!] CRASH: {e}")
+            print(f"[*] Auto-restart #{restarts}/{max_restarts} in {restart_delay}s...")
+            print("[*] Progress saved in checkpoint, will continue from there.")
+            time.sleep(restart_delay)
+            
+            # Force --resume on restart
+            if '--resume' not in sys.argv:
+                sys.argv.append('--resume')
+    
+    if restarts >= max_restarts:
+        print(f"\n[!] Max restarts ({max_restarts}) reached. Run manually with --resume")
+
+
 if __name__ == '__main__':
-    main()
+    # Check if auto-restart is disabled
+    if '--no-auto-restart' in sys.argv:
+        sys.argv.remove('--no-auto-restart')
+        main()
+    else:
+        run_with_auto_restart()
