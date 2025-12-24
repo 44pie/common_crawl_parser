@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Multi-Source Domain Scraper v6.0 - WITH PROGRESS
+Multi-Source Domain Scraper v7.0 - LINE BY LINE PROGRESS
 """
 import requests, re, sys, time, argparse
 from pathlib import Path
@@ -27,15 +27,12 @@ def scrape_reviews_io(threads=50):
         content = fetch(url)
         return set(re.findall(r'/company-reviews/store/([a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-z]{2,})', content))
     
-    done = 0
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {ex.submit(get_domains, sm): sm for sm in sitemaps}
         for f in as_completed(futures):
             domains.update(f.result())
-            done += 1
-            print(f"\r[REVIEWS.IO] {done}/{len(sitemaps)} sitemaps | {len(domains):,} domains", end='', flush=True)
     
-    print(flush=True)
+    print(f"[REVIEWS.IO] Done: {len(domains):,} domains", flush=True)
     return domains
 
 def scrape_trustedsite(threads=50):
@@ -51,7 +48,6 @@ def scrape_trustedsite(threads=50):
         domains = set()
         page = 1
         empty = 0
-        pages_done = 0
         while empty < 3:
             content = fetch(f"https://www.trustedsite.com/directory/{cat}/?page={page}")
             found = set(re.findall(r'host=([^"&]+)', content))
@@ -61,8 +57,7 @@ def scrape_trustedsite(threads=50):
             else:
                 empty += 1
             page += 1
-            pages_done += 1
-        return cat, domains, pages_done
+        return cat, domains, page - 1
     
     done = 0
     total_pages = 0
@@ -76,10 +71,10 @@ def scrape_trustedsite(threads=50):
             done += 1
             total_pages += pages
             elapsed = time.time() - start
-            rate = total_pages / elapsed if elapsed > 0 else 0
-            print(f"\r[TRUSTEDSITE] {done}/{len(cats)} cats | {total_pages} pages | {len(all_domains):,} domains | {rate:.0f} req/s     ", end='', flush=True)
+            # Print every 10 categories
+            if done % 10 == 0 or done == len(cats):
+                print(f"[TRUSTEDSITE] {done}/{len(cats)} | {total_pages} pages | {len(all_domains):,} domains | {elapsed:.0f}s", flush=True)
     
-    print(flush=True)
     return all_domains
 
 def scrape_feedaty():
@@ -87,7 +82,7 @@ def scrape_feedaty():
     content = fetch("https://www.feedaty.com/feedaty/smurls.xml")
     content += fetch("https://www.feedaty.com/sitemap.xml")
     shops = set(re.findall(r'/recensioni/([a-zA-Z0-9][a-zA-Z0-9\-]+)', content))
-    print(f"[FEEDATY] {len(shops):,} shops", flush=True)
+    print(f"[FEEDATY] Done: {len(shops):,} shops", flush=True)
     return shops
 
 def main():
@@ -100,7 +95,7 @@ def main():
     Path(args.output).mkdir(exist_ok=True)
     
     print("=" * 60, flush=True)
-    print(f"DOMAIN SCRAPER v6.0 | {args.threads} threads", flush=True)
+    print(f"DOMAIN SCRAPER v7.0 | {args.threads} threads", flush=True)
     print("=" * 60, flush=True)
     
     start = time.time()
@@ -110,20 +105,21 @@ def main():
         d = scrape_reviews_io(args.threads)
         with open(f"{args.output}/reviews_io.txt", 'w') as f:
             f.write('\n'.join(sorted(d)))
-        print(f"[REVIEWS.IO] Saved {len(d):,} to {args.output}/reviews_io.txt", flush=True)
+        print(f"[SAVED] {args.output}/reviews_io.txt ({len(d):,})", flush=True)
         all_domains.update(d)
     
     if args.source in ['all', 'trustedsite']:
         d = scrape_trustedsite(args.threads)
         with open(f"{args.output}/trustedsite.txt", 'w') as f:
             f.write('\n'.join(sorted(d)))
-        print(f"[TRUSTEDSITE] Saved {len(d):,} to {args.output}/trustedsite.txt", flush=True)
+        print(f"[SAVED] {args.output}/trustedsite.txt ({len(d):,})", flush=True)
         all_domains.update(d)
     
     if args.source in ['all', 'feedaty']:
         s = scrape_feedaty()
         with open(f"{args.output}/feedaty.txt", 'w') as f:
             f.write('\n'.join(sorted(s)))
+        print(f"[SAVED] {args.output}/feedaty.txt ({len(s):,})", flush=True)
     
     if all_domains:
         with open(f"{args.output}/all_domains.txt", 'w') as f:
@@ -131,8 +127,7 @@ def main():
     
     elapsed = time.time() - start
     print("=" * 60, flush=True)
-    print(f"DONE in {elapsed:.0f}s | TOTAL: {len(all_domains):,} domains", flush=True)
-    print(f"Output: {args.output}/", flush=True)
+    print(f"TOTAL: {len(all_domains):,} unique domains in {elapsed:.0f}s", flush=True)
     print("=" * 60, flush=True)
 
 if __name__ == '__main__':
