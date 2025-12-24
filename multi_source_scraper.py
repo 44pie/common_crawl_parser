@@ -7,7 +7,7 @@ from threading import Lock
 sys.stdout.reconfigure(line_buffering=True)
 UA = {'User-Agent': 'Mozilla/5.0'}
 lock = Lock()
-stats = {'cats': 0, 'pages': 0, 'domains': set()}
+stats = {'pages': 0, 'domains': set()}
 
 def fetch(url):
     try: return requests.get(url, headers=UA, timeout=20).text
@@ -28,33 +28,28 @@ def scrape_reviews_io(threads):
     return domains
 
 def scrape_page(args):
-    cat, page = args
-    content = fetch(f"https://www.trustedsite.com/directory/{cat}/?page={page}")
+    cat, offset = args
+    content = fetch(f"https://www.trustedsite.com/directory/{cat}/?s={offset}")
     found = set(re.findall(r'host=([^"&]+)', content))
     with lock:
         stats['pages'] += 1
         stats['domains'].update(found)
-        if stats['pages'] % 50 == 0:
-            print(f"[TRUSTEDSITE] {stats['pages']} pages | {len(stats['domains']):,} domains")
-    return found
+        if stats['pages'] % 100 == 0:
+            print(f"[TRUSTEDSITE] {stats['pages']} requests | {len(stats['domains']):,} domains")
+    return len(found)
 
 def scrape_trustedsite(threads):
     global stats
-    stats = {'cats': 0, 'pages': 0, 'domains': set()}
+    stats = {'pages': 0, 'domains': set()}
     print("[TRUSTEDSITE] Start")
     sitemap = fetch("https://www.trustedsite.com/sitemap-xml")
     cats = list(set(re.findall(r'/directory/([^/]+)/', sitemap)))
-    print(f"[TRUSTEDSITE] {len(cats)} categories, scanning pages...")
+    print(f"[TRUSTEDSITE] {len(cats)} categories")
     
-    # First pass: get page 1 of all categories
-    tasks = [(c, 1) for c in cats]
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        list(ex.map(scrape_page, tasks))
+    # Generate tasks: each category, offsets 0,10,20...200 (max 20 pages per cat)
+    tasks = [(c, s) for c in cats for s in range(0, 201, 10)]
+    print(f"[TRUSTEDSITE] {len(tasks)} total requests")
     
-    print(f"[TRUSTEDSITE] Page 1 done: {len(stats['domains']):,} domains, scanning more pages...")
-    
-    # Second pass: pages 2-50 for all categories
-    tasks = [(c, p) for c in cats for p in range(2, 51)]
     with ThreadPoolExecutor(max_workers=threads) as ex:
         list(ex.map(scrape_page, tasks))
     
@@ -74,7 +69,8 @@ def main():
     p.add_argument('-t', '--threads', type=int, default=50)
     args = p.parse_args()
     Path(args.output).mkdir(exist_ok=True)
-    print(f"{'='*50}\nSCRAPER v9 | {args.threads} threads\n{'='*50}")
+    print(f"{'='*50}\nSCRAPER v10 | {args.threads} threads\n{'='*50}")
+    start = time.time()
     all_d = set()
     d = scrape_reviews_io(args.threads)
     open(f"{args.output}/reviews_io.txt",'w').write('\n'.join(sorted(d)))
@@ -85,6 +81,6 @@ def main():
     s = scrape_feedaty()
     open(f"{args.output}/feedaty.txt",'w').write('\n'.join(sorted(s)))
     open(f"{args.output}/all_domains.txt",'w').write('\n'.join(sorted(all_d)))
-    print(f"{'='*50}\nTOTAL: {len(all_d):,} domains\n{'='*50}")
+    print(f"{'='*50}\nTOTAL: {len(all_d):,} | Time: {time.time()-start:.0f}s\n{'='*50}")
 
 if __name__ == '__main__': main()
