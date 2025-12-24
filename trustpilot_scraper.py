@@ -15,6 +15,7 @@ LOCALES = {
     'nz': 'en-nz', 'ie': 'en-ie', 'de': 'de-de', 'at': 'de-at', 
     'ch': 'de-ch', 'fr': 'fr-fr', 'be': 'fr-be', 'es': 'es-es', 
     'it': 'it-it', 'nl': 'nl-nl', 'dk': 'da-dk',
+    'be-nl': 'nl-be',  # Belgium (Dutch)
 }
 
 BASE_URL = "https://sitemaps.trustpilot.com/domains{page}_{locale}.xml"
