@@ -125,7 +125,7 @@ def main():
         domains = domains[skip:]
     
     print(f"{'='*70}")
-    print(f"FAST DETECTOR | {len(domains):,} domains | {args.threads} threads | Timeout: 5s")
+    print(f"FULL DETECTOR | {len(domains):,} domains | {args.threads} threads | Timeout: 5s")
     print(f"CTRL+C to save checkpoint and exit")
     print(f"{'='*70}")
     
