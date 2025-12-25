@@ -1,35 +1,16 @@
 """
-E-commerce Platform Detection Module
-Multi-level detection: headers -> cookies -> meta tags -> HTML content
-FIXED: Checkpoint save, resume, graceful CTRL+C
-
-Usage:
-  python detector.py domain.com
-  python detector.py -f domains.txt -w 50 -o results.csv
-  python detector.py -f domains.txt -w 50 -o results.csv -r  # resume
+E-commerce Platform Detection Module - FIXED VERSION
 """
-
-import sys
-import argparse
-import re
-import requests
-import time
-import signal
-import json
+import sys, argparse, re, requests, time, signal, json
 from pathlib import Path
-from typing import Optional, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+import urllib3
+urllib3.disable_warnings()
 
 REQUEST_TIMEOUT = 10
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html'}
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-}
-
-# Global state
 lock = Lock()
 running = True
 stats = {'checked': 0, 'detected': 0, 'errors': 0, 'total': 0, 'platforms': {}}
@@ -37,81 +18,46 @@ results_list = []
 checkpoint_file = None
 output_file = None
 
-
-def fetch_url(url: str, timeout: int = REQUEST_TIMEOUT) -> Tuple[Optional[requests.Response], str]:
+def fetch_url(url, timeout=REQUEST_TIMEOUT):
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
     try:
-        response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True, verify=False)
-        return response, ''
+        return requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True, verify=False), ''
     except requests.exceptions.Timeout:
         return None, 'timeout'
     except requests.exceptions.SSLError:
         return None, 'ssl_error'
     except requests.exceptions.ConnectionError:
         return None, 'connection_error'
-    except requests.exceptions.TooManyRedirects:
-        return None, 'too_many_redirects'
-    except requests.exceptions.RequestException as e:
-        return None, f'error: {str(e)[:30]}'
+    except:
+        return None, 'error'
 
-
-def detect_from_headers(headers: Dict) -> str:
-    headers_lower = {k.lower(): v.lower() for k, v in headers.items()}
-    if 'x-shopify-stage' in headers_lower or 'x-shopid' in headers_lower:
+def detect_from_headers(headers):
+    h = {k.lower(): v.lower() for k, v in headers.items()}
+    if 'x-shopify-stage' in h or 'x-shopid' in h or h.get('server','').startswith('shopify'):
         return 'Shopify'
-    if headers_lower.get('server', '').startswith('shopify'):
-        return 'Shopify'
-    if 'x-bc-' in str(headers_lower):
-        return 'BigCommerce'
-    if 'x-magento-' in str(headers_lower):
-        return 'Magento'
-    if 'x-dw-request-base-id' in headers_lower:
-        return 'Demandware'
-    if 'x-wix-request-id' in headers_lower:
-        return 'Wix'
+    if 'x-bc-' in str(h): return 'BigCommerce'
+    if 'x-magento-' in str(h): return 'Magento'
+    if 'x-dw-request-base-id' in h: return 'Demandware'
+    if 'x-wix-request-id' in h: return 'Wix'
     return ''
 
-
-def detect_from_cookies(cookies) -> str:
-    cookie_str = str(cookies).lower()
-    if 'woocommerce_' in cookie_str or 'wp_woocommerce' in cookie_str:
-        return 'WooCommerce'
-    if '_shopify_' in cookie_str or 'shopify_pay' in cookie_str:
-        return 'Shopify'
-    if 'mage-' in cookie_str or 'form_key' in cookie_str:
-        return 'Magento'
-    if 'prestashop' in cookie_str:
-        return 'PrestaShop'
-    if 'phpsessid' in cookie_str and 'currency' in cookie_str and 'language' in cookie_str:
-        return 'OpenCart'
-    if 'bitrix_' in cookie_str:
-        return 'Bitrix'
+def detect_from_cookies(cookies):
+    c = str(cookies).lower()
+    if 'woocommerce_' in c: return 'WooCommerce'
+    if '_shopify_' in c: return 'Shopify'
+    if 'mage-' in c: return 'Magento'
+    if 'prestashop' in c: return 'PrestaShop'
+    if 'phpsessid' in c and 'currency' in c: return 'OpenCart'
+    if 'bitrix_' in c: return 'Bitrix'
     return ''
-
-
-def detect_from_meta(html: str) -> str:
-    generator_match = re.search(r'<meta[^>]*name=["\']generator["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    if not generator_match:
-        generator_match = re.search(r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']generator["\']', html, re.IGNORECASE)
-    if generator_match:
-        generator = generator_match.group(1).lower()
-        mapping = {'woocommerce': 'WooCommerce', 'shopify': 'Shopify', 'magento': 'Magento',
-                   'prestashop': 'PrestaShop', 'opencart': 'OpenCart', 'squarespace': 'Squarespace',
-                   'wix': 'Wix', 'weebly': 'Weebly', 'tilda': 'Tilda', 'bitrix': 'Bitrix',
-                   '1c-bitrix': 'Bitrix', 'shopware': 'Shopware', 'ecwid': 'Ecwid'}
-        for k, v in mapping.items():
-            if k in generator:
-                return v
-    return ''
-
 
 PLATFORM_CHECKS = [
     (lambda t: 'shopify' in t or 'cdn.shopify.com' in t or 'myshopify.com' in t, 'Shopify'),
     (lambda t: 'woocommerce' in t or 'wc-block' in t or '/wp-content/plugins/woocommerce/' in t, 'WooCommerce'),
     (lambda t: 'magento' in t or '/skin/frontend/' in t or '/static/frontend/' in t or 'mage.cookies' in t, 'Magento'),
     (lambda t: 'bigcommerce' in t or 'cdn.bigcommerce.com' in t, 'BigCommerce'),
-    (lambda t: 'prestashop' in t or '/modules/ps_' in t or '/themes/classic/assets/' in t or 'blockcart' in t or 'ps_customersignin' in t, 'PrestaShop'),
+    (lambda t: 'prestashop' in t or '/modules/ps_' in t or '/themes/classic/assets/' in t or 'blockcart' in t, 'PrestaShop'),
     (lambda t: 'wix.com' in t or 'wixsite.com' in t or '_wix_' in t, 'Wix'),
     (lambda t: 'squarespace' in t or 'static.squarespace.com' in t, 'Squarespace'),
     (lambda t: 'bigcartel' in t, 'BigCartel'),
@@ -133,35 +79,22 @@ PLATFORM_CHECKS = [
     (lambda t: 'cs-cart' in t or 'cscart' in t, 'CS-Cart'),
 ]
 
-
-def detect_platform(text: str) -> str:
-    text_lower = text.lower()
-    for check_func, platform_name in PLATFORM_CHECKS:
+def detect_platform(text):
+    t = text.lower()
+    for check, name in PLATFORM_CHECKS:
         try:
-            if check_func(text_lower):
-                return platform_name
-        except:
-            continue
+            if check(t): return name
+        except: pass
     return ''
 
-
-def check_domain(domain: str, timeout: int = REQUEST_TIMEOUT) -> dict:
-    response, error = fetch_url(domain, timeout)
-    if response is None:
-        return {'domain': domain, 'platform': '', 'status_code': 0, 'error': error}
-    
-    platform = ''
-    html_text = response.text
-    platform = detect_from_headers(dict(response.headers))
-    if not platform:
-        platform = detect_from_cookies(response.cookies)
-    if not platform:
-        platform = detect_platform(html_text)
-    if not platform:
-        platform = detect_from_meta(html_text)
-    
-    return {'domain': domain, 'platform': platform, 'status_code': response.status_code, 'error': ''}
-
+def check_domain(domain, timeout=REQUEST_TIMEOUT):
+    resp, err = fetch_url(domain, timeout)
+    if resp is None:
+        return {'domain': domain, 'platform': '', 'status_code': 0, 'error': err}
+    platform = detect_from_headers(dict(resp.headers))
+    if not platform: platform = detect_from_cookies(resp.cookies)
+    if not platform: platform = detect_platform(resp.text)
+    return {'domain': domain, 'platform': platform, 'status_code': resp.status_code, 'error': ''}
 
 def save_checkpoint():
     global stats, results_list, checkpoint_file, output_file
@@ -173,7 +106,6 @@ def save_checkpoint():
                 for r in results_list:
                     f.write(f"{r['domain']},{r['platform']},{r['status_code']},{r['error']}\n")
 
-
 def signal_handler(sig, frame):
     global running
     print("\n[!] CTRL+C - Saving progress...")
@@ -182,107 +114,87 @@ def signal_handler(sig, frame):
     print(f"[!] Saved {len(results_list):,} results. Use -r to resume.")
     sys.exit(0)
 
-
-def format_time(seconds):
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    elif seconds < 3600:
-        return f"{seconds/60:.1f}m"
-    else:
-        return f"{seconds/3600:.1f}h"
-
+def fmt_time(s):
+    return f"{s:.0f}s" if s < 60 else f"{s/60:.1f}m" if s < 3600 else f"{s/3600:.1f}h"
 
 def print_stats(stats, elapsed):
     sys.stdout.write('\033[H\033[J')
-    W, G, SEP, EQ = 35, '   ', '-' * 35, '=' * 73
+    checked = stats['checked']
+    detected = stats['detected']
+    errors = stats['errors']
+    total = stats['total']
+    rate = checked / elapsed if elapsed > 0 else 0
+    det_pct = 100 * detected / checked if checked > 0 else 0
+    err_pct = 100 * errors / checked if checked > 0 else 0
+    remaining = total - checked
+    prog_pct = 100 * checked / total if total > 0 else 0
     
-    def fmt(label, value):
-        return label + ' ' * (W - len(label) - len(str(value))) + str(value)
+    print("=" * 73)
+    print(f"E-COMMERCE PLATFORM DETECTOR          PLATFORMS DETECTED")
+    print("=" * 73)
+    print(f"Domains Checked: {checked:>15,}   -----------------------------------")
+    print(f"Platforms Found: {detected:>15,}")
+    print(f"Detection Rate:  {det_pct:>14.1f}%")
+    print(f"Errors:          {errors:>10,} ({err_pct:.1f}%)")
+    print(f"Speed:           {rate:>14.1f}/s")
+    print(f"Elapsed:         {fmt_time(elapsed):>15}")
+    print("-" * 35 + "   " + "-" * 35)
+    print("PROGRESS:                             PLATFORMS:")
+    print("-" * 35 + "   " + "-" * 35)
     
-    rate = stats['checked'] / elapsed if elapsed > 0 else 0
-    det_pct = 100 * stats['detected'] / stats['checked'] if stats['checked'] > 0 else 0
-    err_pct = 100 * stats['errors'] / stats['checked'] if stats['checked'] > 0 else 0
-    remaining = stats['total'] - stats['checked']
-    progress_pct = 100 * stats['checked'] / stats['total'] if stats['total'] > 0 else 0
+    plats = sorted(stats['platforms'].items(), key=lambda x: -x[1])
+    left = [f"Checked: {checked:>20,}", f"Remaining: {remaining:>18,}", f"Progress: {prog_pct:>18.1f}%"]
+    right = [f"{p}: {c:,} ({100*c/detected:.1f}%)" if detected else f"{p}: {c:,}" for p,c in plats]
     
-    print(EQ)
-    print(f"{'E-COMMERCE PLATFORM DETECTOR':<35}{G}{'PLATFORMS DETECTED':<35}")
-    print(EQ)
-    print(f"{fmt('Domains Checked:', f'{stats[\"checked\"]:,}'):<35}{G}{SEP}")
-    print(f"{fmt('Platforms Found:', f'{stats[\"detected\"]:,}'):<35}")
-    print(f"{fmt('Detection Rate:', f'{det_pct:.1f}%'):<35}")
-    print(f"{fmt('Errors:', f'{stats[\"errors\"]:,} ({err_pct:.1f}%)'):<35}")
-    print(f"{fmt('Speed:', f'{rate:.1f}/s'):<35}")
-    print(f"{fmt('Elapsed:', format_time(elapsed)):<35}")
-    print(f"{SEP:<35}{G}{SEP}")
-    print(f"{'PROGRESS:':<35}{G}{'PLATFORMS:':<35}")
-    print(f"{SEP:<35}{G}{SEP}")
-    
-    plat_list = sorted(stats['platforms'].items(), key=lambda x: -x[1])
-    rows_left = [fmt('Checked:', f"{stats['checked']:,}"), fmt('Remaining:', f"{remaining:,}"), fmt('Progress:', f"{progress_pct:.1f}%")]
-    rows_right = [fmt(p, f"{c:,} ({100*c/stats['detected']:.1f}%)") if stats['detected'] > 0 else fmt(p, f"{c:,}") for p, c in plat_list]
-    
-    for i in range(max(len(rows_left), len(rows_right), 1)):
-        left = rows_left[i] if i < len(rows_left) else ' ' * W
-        right = rows_right[i] if i < len(rows_right) else ' ' * W
-        print(f"{left:<35}{G}{right:<35}")
+    for i in range(max(len(left), len(right), 3)):
+        l = left[i] if i < len(left) else ""
+        r = right[i] if i < len(right) else ""
+        print(f"{l:<35}   {r}")
     print()
     sys.stdout.flush()
-
 
 def process_domain(args):
     global stats, results_list, running
     domain, timeout = args
-    if not running:
-        return None
-    
+    if not running: return None
     result = check_domain(domain, timeout)
-    
     with lock:
         stats['checked'] += 1
         results_list.append(result)
-        if result['error']:
-            stats['errors'] += 1
+        if result['error']: stats['errors'] += 1
         if result['platform']:
             stats['detected'] += 1
             stats['platforms'][result['platform']] = stats['platforms'].get(result['platform'], 0) + 1
-        
         if stats['checked'] % 5000 == 0:
             save_checkpoint()
-    
     return result
-
 
 def main():
     global stats, results_list, checkpoint_file, output_file, running
-    
-    import urllib3
-    urllib3.disable_warnings()
-    
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    parser = argparse.ArgumentParser(description='E-commerce Platform Detector')
-    parser.add_argument('domain', nargs='?', help='Single domain to check')
-    parser.add_argument('-f', '--file', help='File with domains')
-    parser.add_argument('-w', '--workers', type=int, default=20, help='Parallel workers (default: 20)')
-    parser.add_argument('-t', '--timeout', type=int, default=10, help='Request timeout (default: 10)')
-    parser.add_argument('-o', '--output', help='Output CSV file')
-    parser.add_argument('-r', '--resume', action='store_true', help='Resume from checkpoint')
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description='E-commerce Platform Detector')
+    p.add_argument('domain', nargs='?')
+    p.add_argument('-f', '--file')
+    p.add_argument('-w', '--workers', type=int, default=20)
+    p.add_argument('-t', '--timeout', type=int, default=10)
+    p.add_argument('-o', '--output')
+    p.add_argument('-r', '--resume', action='store_true')
+    args = p.parse_args()
     
     if not args.domain and not args.file:
-        parser.error('Provide a domain or -f/--file with domain list')
+        p.error('Provide domain or -f file')
     
     output_file = args.output
     checkpoint_file = (args.output or 'detector') + '_checkpoint.json'
     
     if args.domain:
-        result = check_domain(args.domain, args.timeout)
-        print(f"{result['domain']},{result['platform']},{result['status_code']},{result['error']}")
+        r = check_domain(args.domain, args.timeout)
+        print(f"{r['domain']},{r['platform']},{r['status_code']},{r['error']}")
         return
     
-    domains = [line.strip() for line in open(args.file) if line.strip()]
+    domains = [l.strip() for l in open(args.file) if l.strip()]
     skip = 0
     
     if args.resume and Path(checkpoint_file).exists():
@@ -291,7 +203,7 @@ def main():
         skip = data['checked_count']
         if args.output and Path(args.output).exists():
             with open(args.output) as f:
-                next(f)  # skip header
+                next(f)
                 for line in f:
                     parts = line.strip().split(',')
                     if len(parts) >= 4:
@@ -300,24 +212,21 @@ def main():
         domains = domains[skip:]
     
     stats['total'] = len(domains) + skip
-    start_time = time.time()
+    start = time.time()
     last_print = 0
     
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [executor.submit(process_domain, (d, args.timeout)) for d in domains]
-        for future in as_completed(futures):
-            if not running:
-                break
-            elapsed = time.time() - start_time
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futures = [ex.submit(process_domain, (d, args.timeout)) for d in domains]
+        for f in as_completed(futures):
+            if not running: break
+            elapsed = time.time() - start
             if elapsed - last_print >= 0.5:
                 print_stats(stats, elapsed)
                 last_print = elapsed
     
     save_checkpoint()
-    elapsed = time.time() - start_time
-    print_stats(stats, elapsed)
-    print(f"\nDone! Results saved to {args.output or 'stdout'}")
-
+    print_stats(stats, time.time() - start)
+    print(f"\nDone! Results: {args.output}")
 
 if __name__ == '__main__':
     main()
